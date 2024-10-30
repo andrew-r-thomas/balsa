@@ -7,12 +7,20 @@ service RaftService {
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
 }
 
-message RequestVoteRequest {}
-message RequestVoteResponse {}
+message RequestVoteRequest {
+  uint32 term = 1;
+  string addr = 2;
+}
+message RequestVoteResponse {
+  uint32 term = 1;
+  bool granted = 2;
+}
 
 message AppendEntriesRequest {
-  string ping = 1;
+  uint32 term = 1;
+  string addr = 2;
 }
 message AppendEntriesResponse {
-  string pong = 1;
+  uint32 term = 1;
+  bool success = 2;
 }
