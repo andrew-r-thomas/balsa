@@ -2,43 +2,40 @@
 
 	 TODO:
 	- add help to picker page and new sim page
-	- new sim page needs text input for name, and a switch for
-	  whether or not its a temporary sim
 	- filtering for picker page
 	- delete sims
 	- make it pretty
 	- get some kind of sim visual working (break this into smaller pieces)
-
-*/
-
-/*
+	- figure out when we should do stuff in "InitialModel" and when we
+	  should do stuff in "Init"
+	- change io stuff to be driven via commands
 
 	 NOTE:
-	we might want want to use a sqlite db to store info instead of the
-	file system, and just have different dbs for each sim/node
 
 */
 
 package main
 
 import (
+	"balsa/cli/picker"
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
+	"database/sql"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	_ "github.com/mattn/go-sqlite3"
 )
 
+const createTables = `
+create table sims (
+	id integer primary key autoincrement,
+	name text not null unique
+);
+`
 const quitText = "\"A genuine leader is not a searcher for consensus but a molder of consensus.\"\n\n- Martin Luther King Jr."
-
-type Views int
-
-const (
-	PickerView Views = iota
-	NewSimView
-	SimView
-)
 
 // TODO: for making stuff pretty
 var (
@@ -49,29 +46,67 @@ type model struct {
 	quitting bool
 
 	currentView tea.Model
+	dbHandle    *sql.DB
 }
 
 func initialModel() model {
-	_, noSims := os.Stat("./sims")
-	if noSims != nil {
-		err := os.Mkdir("./sims", 0755)
-		if err != nil {
-			log.Fatalf("unable to make sims dir: %v", err)
+	var dbHandle *sql.DB
+	simsPath := filepath.Join(".", "sims")
+	_, simsDirErr := os.Stat(simsPath)
+	if simsDirErr != nil {
+		if os.IsNotExist(simsDirErr) {
+			simsDirErr = os.Mkdir(simsPath, 0755)
+			if simsDirErr != nil {
+				log.Fatal(simsDirErr)
+			}
+			dbPath := filepath.Join(simsPath, ".db")
+			db, dbErr := sql.Open("sqlite3", dbPath)
+			if dbErr != nil {
+				log.Fatal(dbErr)
+			}
+			_, err := db.Exec(createTables)
+			if err != nil {
+				log.Fatal(err)
+			}
+			dbHandle = db
+		} else {
+			log.Fatalf("sims directory error: %v", simsDirErr)
+		}
+	} else {
+		dbPath := filepath.Join(simsPath, ".db")
+		_, dbPathErr := os.Stat(dbPath)
+		if dbPathErr != nil {
+			if os.IsNotExist(dbPathErr) {
+				dbPath := filepath.Join(simsPath, ".db")
+				db, dbErr := sql.Open("sqlite3", dbPath)
+				if dbErr != nil {
+					log.Fatal(dbErr)
+				}
+				_, err := db.Exec(createTables)
+				if err != nil {
+					log.Fatal(err)
+				}
+				dbHandle = db
+			} else {
+				log.Fatalf("sims db error: %v", dbPathErr)
+			}
+		} else {
+			db, dbErr := sql.Open("sqlite3", dbPath)
+			if dbErr != nil {
+				log.Fatalf("db open error: %v", dbErr)
+			} else {
+				dbHandle = db
+			}
 		}
 	}
 
-	// TODO: change this to db query
-	sims, simsErr := os.ReadDir("./sims")
-	if simsErr != nil {
-		log.Fatalf("unable to make open sims dir: %v", simsErr)
-	}
-
 	return model{
-		quitting: false,
+		quitting:    false,
+		currentView: picker.InitialModel(dbHandle),
+		dbHandle:    dbHandle,
 	}
 }
 
-// TODO: maybe put loading stuff in here
 func (m model) Init() tea.Cmd {
 	return nil
 }
@@ -86,7 +121,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	return m.currentView.Update(msg)
+	var cmd tea.Cmd
+	m.currentView, cmd = m.currentView.Update(msg)
+	return m, cmd
 }
 
 func (m model) View() string {

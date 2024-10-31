@@ -6,9 +6,9 @@
 package main
 
 import (
-	"log"
+	"fmt"
+	"net/http"
 	"os"
-	"strconv"
 )
 
 type NodeAddr struct {
@@ -16,31 +16,22 @@ type NodeAddr struct {
 	httpAddr string
 }
 
-// TODO: this might be better as just an array
-var addrs = map[int]NodeAddr{
-	0: {grpcAddr: "localhost:50051", httpAddr: "localhost:3000"},
-	1: {grpcAddr: "localhost:50052", httpAddr: "localhost:3001"},
-	2: {grpcAddr: "localhost:50053", httpAddr: "localhost:3002"},
-	3: {grpcAddr: "localhost:50054", httpAddr: "localhost:3003"},
-	4: {grpcAddr: "localhost:50055", httpAddr: "localhost:3004"},
+func sseLogs(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "you called the logger\n")
 }
 
 func main() {
-	nodeNum, err := strconv.Atoi(os.Args[1])
-	if err != nil {
-		log.Fatalf("invalid node number")
-	}
-	nodeAddr := addrs[nodeNum]
+	grpcAddr := os.Args[1]
+	httpAddr := os.Args[2]
 
 	var sibAddrs []string
-	for i, addr := range addrs {
-		if i == nodeNum {
-			continue
-		} else {
-			sibAddrs = append(sibAddrs, addr.grpcAddr)
-		}
+	for _, addr := range os.Args[3:] {
+		sibAddrs = append(sibAddrs, addr)
 	}
 
-	node := NewRaftServiceServer(sibAddrs, nodeAddr.grpcAddr)
-	node.Start()
+	node := NewRaftServiceServer(sibAddrs, grpcAddr)
+	go node.Start()
+
+	http.HandleFunc("/logs", sseLogs)
+	http.ListenAndServe(httpAddr, nil)
 }

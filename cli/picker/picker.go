@@ -1,8 +1,12 @@
 package picker
 
 import (
+	"balsa/cli/newsim"
+	"balsa/cli/sim"
+	"database/sql"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -21,42 +25,62 @@ var (
 	helpStyle         = list.DefaultStyles().HelpStyle.PaddingLeft(4).PaddingBottom(1)
 )
 
-// TODO: figure out wtf all this bullshit is doing
-type item string                                               //
-func (i item) FilterValue() string                             { return "" } //
-type itemDelegate struct{}                                     //
-func (d itemDelegate) Height() int                             { return 1 }   //
-func (d itemDelegate) Spacing() int                            { return 0 }   //
-func (d itemDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil } //
-func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list.Item) { //
-	i, ok := listItem.(item) //
-	if !ok {                 //
-		return //
-	}
-	//
-	str := fmt.Sprintf("%d. %s", index+1, i) //
-	//
-	fn := itemStyle.Render  //
-	if index == m.Index() { //
-		fn = func(s ...string) string { //
-			return selectedItemStyle.Render("> " + strings.Join(s, " ")) //
-		} //
-	} //
-	//
-	fmt.Fprint(w, fn(str)) //
-} //
-//
-
-type Model struct {
-	list   list.Model
-	choice string
+type item struct {
+	sim sim.Sim
 }
 
-func InitialModel(sims []string) Model {
-	var items []list.Item
-	for _, sim := range sims {
-		items = append(items, item(sim))
+func (i item) FilterValue() string { return i.sim.Name }
+
+type itemDelegate struct{}
+
+func (d itemDelegate) Height() int                             { return 1 }
+func (d itemDelegate) Spacing() int                            { return 0 }
+func (d itemDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
+func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list.Item) {
+	i, ok := listItem.(item)
+	if !ok {
+		return
 	}
+
+	str := fmt.Sprintf("- %s", i.sim.Name)
+
+	fn := itemStyle.Render
+	if index == m.Index() {
+		fn = func(s ...string) string {
+			return selectedItemStyle.Render("> " + strings.Join(s, " "))
+		}
+	}
+
+	fmt.Fprint(w, fn(str))
+}
+
+type Model struct {
+	list     list.Model
+	dbHandle *sql.DB
+}
+
+func InitialModel(dbHandle *sql.DB) Model {
+	sims, simsErr := dbHandle.Query("select * from sims")
+	if simsErr != nil {
+		log.Fatalf("unable to make open sims dir: %v", simsErr)
+	}
+	defer sims.Close()
+
+	var items []list.Item
+	for sims.Next() {
+		var name string
+		var id int
+		simsErr = sims.Scan(&id, &name)
+		if simsErr != nil {
+			log.Fatal(simsErr)
+		}
+		items = append(items, item{sim: sim.Sim{Id: id, Name: name}})
+	}
+	simsErr = sims.Err()
+	if simsErr != nil {
+		log.Fatal(simsErr)
+	}
+
 	list := list.New(items, itemDelegate{}, defaultWidth, listHeight)
 	list.Title = "select a sim to run or create a new one"
 	list.SetShowStatusBar(false)
@@ -65,7 +89,8 @@ func InitialModel(sims []string) Model {
 	list.Styles.PaginationStyle = paginationStyle
 	list.Styles.HelpStyle = helpStyle
 	return Model{
-		list: list,
+		list:     list,
+		dbHandle: dbHandle,
 	}
 }
 func (m Model) Init() tea.Cmd {
@@ -78,17 +103,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		switch keypress := msg.String(); keypress {
-		// TODO: switch to new sim view
 		case "n":
-			return m, nil
+			return newsim.InitialModel(m.dbHandle), nil
 
-		// TODO: this is where we will select a sim
 		case "enter":
-			i, ok := m.list.SelectedItem().(item)
-			if ok {
-				m.choice = string(i)
-			}
-			return m, tea.Quit
+			i := m.list.SelectedItem().(item)
+			return sim.InitialModel(i.sim), nil
 		}
 	}
 
