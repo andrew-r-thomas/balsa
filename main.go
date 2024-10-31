@@ -1,19 +1,15 @@
+/*
+	 TODO:
+	- make log based grpc stream out to the cli
+*/
+
 package main
 
 import (
-	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"strconv"
 )
-
-func query(w http.ResponseWriter, r *http.Request) {
-	fmt.Printf("query called\n")
-}
-
-type HttpServer struct {
-}
 
 type NodeAddr struct {
 	grpcAddr string
@@ -47,7 +43,4 @@ func main() {
 
 	node := NewRaftServiceServer(sibAddrs, nodeAddr.grpcAddr)
 	node.Start()
-
-	http.HandleFunc("/query", query)
-	http.ListenAndServe(nodeAddr.httpAddr, nil)
 }

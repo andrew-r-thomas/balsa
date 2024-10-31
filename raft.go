@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math/rand/v2"
+	"net"
 	"sync"
 	"time"
 
@@ -13,38 +15,43 @@ import (
 	raft "balsa/raft"
 )
 
+// TODO: ok so we are getting an issue of converting to a follower when our
+// leader is ""
+
 // election timeout range in ms
-const eltoS = 150
-const eltoE = 300
+const eltoS = 1000
+const eltoE = 2000
 
-const hbS = 100
-const hbE = 400
-
-type ServerState int
-
-const (
-	StateLeader ServerState = iota
-	StateCandidate
-	StateFollower
-)
+const hbS = 150
+const hbE = 300
 
 // TODO: maybe actual ids for nodes
+// TODO: also technically some of this needs to be persistent,
+// but we'd like to be able to spawn sims quickly, so maybe we have an option
+// to start up an old system, or kill a node for a bit, and then we can also
+// just reset everything
 type RaftServiceServer struct {
 	raft.UnimplementedRaftServiceServer
 
+	// these two don't change, access them whenever
 	addr  string
 	nodes map[string]raft.RaftServiceClient
-	// state ServerState
 
+	// these change and need to be persistent,
+	// reads should happen through lock.RLock() and lock.Unlock()
+	// writes should happen through calling functions
 	currentTermLock sync.RWMutex
 	currentTerm     uint32
+	leaderLock      sync.RWMutex
 	leader          string
 
-	eventChan chan<- event
+	// TODO: need to double check that this is triggering things correctly
+	followChan chan<- follow
 }
 
-type event struct{}
+type follow struct{}
 
+// TODO: add building from persistent data option
 func NewRaftServiceServer(nodeAddrs []string, addr string) RaftServiceServer {
 	nodes := make(map[string]raft.RaftServiceClient)
 	for _, na := range nodeAddrs {
@@ -64,45 +71,55 @@ func NewRaftServiceServer(nodeAddrs []string, addr string) RaftServiceServer {
 		nodes:       nodes,
 		currentTerm: 0,
 		leader:      "",
-		// state:       StateFollower,
-		addr:      addr,
-		eventChan: nil,
+		addr:        addr,
+		followChan:  nil,
 	}
 }
 
 func (s *RaftServiceServer) Start() {
 	// TODO: figure out if this should be buffered
-	eventChan := make(chan event)
-	s.eventChan = eventChan
-	go s.startFollowing(eventChan)
-	// TODO:
+	followChan := make(chan follow)
+	s.followChan = followChan
+
+	lis, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		log.Fatalf("error listening: %v", err)
+	}
+
+	grpcServer := grpc.NewServer()
+	raft.RegisterRaftServiceServer(grpcServer, s)
+
+	go s.startFollowing(followChan)
+	grpcServer.Serve(lis)
 }
 
-func (s *RaftServiceServer) startFollowing(eventChan <-chan event) {
+func (s *RaftServiceServer) startFollowing(followChan <-chan follow) {
+	s.leaderLock.RLock()
+	fmt.Printf("%s: following %s\n", s.addr, s.leader)
+	s.leaderLock.RUnlock()
 	ms := rand.IntN(eltoE-eltoS) + eltoS
 	dur := time.Millisecond * time.Duration(ms)
 	select {
 	case <-time.After(dur):
-		s.startElection(eventChan)
-	case <-eventChan:
-		go s.startFollowing(eventChan)
+		go s.startElection(followChan)
+	case <-followChan:
+		go s.startFollowing(followChan)
 	}
 }
 
 // this switches us to a candidate state
-func (s *RaftServiceServer) startElection(eventChan <-chan event) {
-	s.incrementCurrentTerm()
-	s.updateCurrentLeader("")
+func (s *RaftServiceServer) startElection(followChan <-chan follow) {
+	fmt.Printf("%s: candidate\n", s.addr)
+	s.updateCurrentTerm(0)
+	s.updateCurrentLeader("self")
 
 	elms := rand.IntN(eltoE-eltoS) + eltoS
 	eldur := time.Millisecond * time.Duration(elms)
 	elTo := time.After(eldur)
 
-	s.currentTermLock.RLock()
-	currentTerm := s.currentTerm
-	s.currentTermLock.Unlock()
 	won := make(chan bool, 1)
 	go func() {
+		s.currentTermLock.RLock()
 		var wg sync.WaitGroup
 		var resps []chan *raft.RequestVoteResponse
 		for _, sibNode := range s.nodes {
@@ -113,7 +130,7 @@ func (s *RaftServiceServer) startElection(eventChan <-chan event) {
 				resp, rvErr := sibNode.RequestVote(
 					context.Background(),
 					&raft.RequestVoteRequest{
-						Term: currentTerm,
+						Term: s.currentTerm,
 						Addr: s.addr,
 					},
 				)
@@ -126,6 +143,7 @@ func (s *RaftServiceServer) startElection(eventChan <-chan event) {
 				wg.Done()
 			}()
 		}
+		s.currentTermLock.RUnlock()
 		wg.Wait()
 
 		totalVotes := 0
@@ -142,52 +160,107 @@ func (s *RaftServiceServer) startElection(eventChan <-chan event) {
 
 	select {
 	case <-elTo:
-		go s.startElection(eventChan)
-	case <-eventChan:
-		go s.startFollowing(eventChan)
+		go s.startElection(followChan)
+	case <-followChan:
+		go s.startFollowing(followChan)
 	case <-won:
-		go s.startLeading(eventChan)
+		go s.startLeading(followChan)
 	}
 
 }
 
-func (s *RaftServiceServer) startLeading(eventChan <-chan event) {
+func (s *RaftServiceServer) startLeading(followChan <-chan follow) {
+	fmt.Printf("%s: leading\n", s.addr)
 	hbms := rand.IntN(hbE-hbS) + hbS
 	hbdur := time.Millisecond * time.Duration(hbms)
 	select {
 	case <-time.After(hbdur):
-		// TODO: go func style wait group for getting results of
-		// append entries calls
-	case <-eventChan:
-		// TODO:
+		var wg sync.WaitGroup
+		var respChans []<-chan *raft.AppendEntriesResponse
+		s.currentTermLock.RLock()
+		for _, sibNode := range s.nodes {
+			respChan := make(chan *raft.AppendEntriesResponse, 1)
+			respChans = append(respChans, respChan)
+			wg.Add(1)
+			go func() {
+				resp, err := sibNode.AppendEntries(
+					context.Background(),
+					&raft.AppendEntriesRequest{
+						Term: s.currentTerm,
+						Addr: s.addr,
+					},
+				)
+
+				if err != nil {
+					// TODO:
+				} else {
+					respChan <- resp
+				}
+				wg.Done()
+			}()
+		}
+		s.currentTermLock.RUnlock()
+
+		wg.Wait()
+		// TODO: check append entries responses
+		go s.startLeading(followChan)
+	case <-followChan:
+		go s.startFollowing(followChan)
 	}
 }
 
-func (s *RaftServiceServer) incrementCurrentTerm() {
-	// TODO:
+// TODO: add persistence for these
+func (s *RaftServiceServer) updateCurrentTerm(term uint32) {
+	s.currentTermLock.Lock()
+	if term == 0 {
+		s.currentTerm++
+	} else {
+		s.currentTerm = term
+	}
+	fmt.Printf("term updated to: %d\n", s.currentTerm)
+	s.currentTermLock.Unlock()
 }
+
 func (s *RaftServiceServer) updateCurrentLeader(leader string) {
-	// TODO:
+	s.leaderLock.Lock()
+	fmt.Printf("leader changing to: %s\n", leader)
+	s.leader = leader
+	s.leaderLock.Unlock()
 }
 
 func (s *RaftServiceServer) AppendEntries(ctx context.Context, r *raft.AppendEntriesRequest) (*raft.AppendEntriesResponse, error) {
+	s.currentTermLock.RLock()
+	defer s.currentTermLock.RUnlock()
+
 	if s.currentTerm > r.Term {
 		return &raft.AppendEntriesResponse{Term: s.currentTerm, Success: false}, nil
 	} else {
-		s.currentTerm = r.Term
-		return &raft.AppendEntriesResponse{Term: s.currentTerm, Success: true}, nil
+		go func() {
+			s.updateCurrentTerm(r.Term)
+			s.updateCurrentLeader(r.Addr)
+			s.followChan <- follow{}
+		}()
+
+		return &raft.AppendEntriesResponse{Term: r.Term, Success: true}, nil
 	}
 }
 
 func (s *RaftServiceServer) RequestVote(ctx context.Context, r *raft.RequestVoteRequest) (*raft.RequestVoteResponse, error) {
-	if s.currentTerm > r.Term {
-		return &raft.RequestVoteResponse{Term: s.currentTerm, Granted: false}, nil
-	} else if s.currentTerm == r.Term && s.leader == "" {
-		s.leader = r.Addr
-		return &raft.RequestVoteResponse{Term: s.currentTerm, Granted: true}, nil
+	s.currentTermLock.RLock()
+	defer s.currentTermLock.RUnlock()
+
+	s.leaderLock.RLock()
+	defer s.leaderLock.RUnlock()
+
+	if (s.leader == "" || s.leader == r.Addr) && s.currentTerm <= r.Term {
+		go func() {
+			s.updateCurrentLeader(r.Addr)
+			s.updateCurrentTerm(r.Term)
+			s.followChan <- follow{}
+		}()
+
+		return &raft.RequestVoteResponse{Term: r.Term, Granted: true}, nil
 	} else {
-		s.leader = r.Addr
-		s.currentTerm = r.Term
-		return &raft.RequestVoteResponse{Term: s.currentTerm, Granted: true}, nil
+		return &raft.RequestVoteResponse{Term: s.currentTerm, Granted: false}, nil
 	}
 }
