@@ -1,0 +1,26 @@
+syntax = "proto3";
+package raft;
+option go_package = "balsa/raft";
+
+service RaftService {
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+}
+
+message RequestVoteRequest {
+  uint32 term = 1;
+  string addr = 2;
+}
+message RequestVoteResponse {
+  uint32 term = 1;
+  bool granted = 2;
+}
+
+message AppendEntriesRequest {
+  uint32 term = 1;
+  string addr = 2;
+}
+message AppendEntriesResponse {
+  uint32 term = 1;
+  bool success = 2;
+}
