@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"time"
 )
 
@@ -58,6 +59,19 @@ func (pt packetType) String() string {
 type client struct {
 	conn net.Conn
 }
+type packet struct {
+	fh    fixedHeader
+	props properties
+
+	keepAlive uint16
+	cid       string
+	username  string
+	password  []byte
+
+	willProps   properties
+	willTopic   string
+	willPayload []byte
+}
 type fixedHeader struct {
 	pt     packetType
 	flags  byte
@@ -68,116 +82,153 @@ type stringPair struct {
 	key string
 	val string
 }
+type properties struct {
+	plFormatId      byte
+	msgExpInterval  uint32
+	contentType     string
+	respTopic       string
+	corrData        []byte
+	subId           uint32
+	sessExpInterval uint32
+	assignedClId    string
+	serverKA        uint16
+	authMethod      string
+	authData        []byte
+	reqProbInfo     byte
+	willDelInterval uint32
+	reqRespInfo     byte
+	respInfo        string
+	serverRef       string
+	reasonStr       string
+	recvMax         uint16
+	topicAliasMax   uint16
+	topicAlias      uint16
+	maxQOS          byte
+	retAvail        byte
+	userProp        stringPair
+	maxPacketSize   uint32
+	wildSubAvail    byte
+	subIdAvail      byte
+	sharedSubAvail  byte
+}
 
 const connectTimeout = time.Second * 5
 const defaultPacketSize = 1024
 
-func handleConn(conn net.Conn) {
+func addConn(conn net.Conn) {
 	packetBuff := make([]byte, defaultPacketSize)
 
-	conn.SetReadDeadline(time.Now().Add(connectTimeout))
+	err := conn.SetReadDeadline(time.Now().Add(connectTimeout))
+	if err != nil {
+		fmt.Printf("error setting read deadline: %v\n", err)
+		return
+	}
+
 	n, err := conn.Read(packetBuff)
 	if err != nil {
 		fmt.Printf("error reading packet: %v\n", err)
-		return
-	}
-
-	fh, err := decodeFixedHeader(packetBuff[0:n])
-	if err != nil {
-		fmt.Printf("error decoding fixed header: %v\n", err)
-		return
-	}
-	if fh.pt != CONNECT {
-		fmt.Printf("client attempted to send packet other than CONNECT first: %v\n", fh.pt)
-		return
-	}
-
-	if fh.len+fh.remLen > n {
-		// TODO: read more into the slice
-	}
-
-	rest := packetBuff[fh.len : fh.len+fh.remLen]
-	// check protocol name
-	if string(rest[2:6]) != "MQTT" {
-		fmt.Printf("invalid protocol name\n")
-		return
-	}
-	// check protocol version
-	// TODO: support older versions
-	if int(rest[6]) != 5 {
-		fmt.Printf("invalid protocol version: %d\n", int(rest[6]))
-		return
-	}
-
-	flags := rest[7]
-	// check reserved flag
-	if flags&1 != 0 {
-		fmt.Printf("reserved flag set, malformed packet\n")
-		return
-	}
-
-	keepAlive := binary.BigEndian.Uint16(rest[8:10])
-	fmt.Printf("keep alive: %d\n", keepAlive)
-
-	propLen, propLenSize, err := decodeVariableByteInt(rest[10:])
-	if err != nil {
-		fmt.Printf("error decoding prop len: %v\n", err)
-		return
-	}
-	i := 0
-	// TODO:
-	// var sessionExpInterval uint32
-	// var recvMax uint16
-	// var maxPacketSize uint32
-	// var topicAliasMax uint16
-	// var reqRespInfo byte
-	// var reqProbInfo byte
-	// var userProp stringPair
-	// var authMethod string
-	// var authData string
-	for i < int(propLen) {
-		switch rest[10+i] {
-		case 0x11:
-			// session expiry interval
-		case 0x21:
-			// receive maximum
-		case 0x27:
-			// maximum packet size
-		case 0x28:
-			// topic alias maximum
-		case 0x19:
-			// request response information
-		case 0x17:
-			// request problem information
-		case 0x26:
-			// user property
-		case 0x15:
-			// authentication method
-		case 0x16:
-			// authentication data
-
-		default:
-			fmt.Printf("invalid property type\n")
-			return
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			conn.Close()
 		}
+		return
 	}
 
-	rest = rest[10+propLenSize+int(propLen):]
-	cidLen := binary.BigEndian.Uint16(rest[0:2])
-	cid := string(rest[2 : 2+cidLen])
-	fmt.Printf("client id: %s\n", cid)
+	p, err := decodePacket(packetBuff[0:n])
+	if err != nil {
+		fmt.Printf("error decoding packet: %v\n", err)
+		return
+	}
+	if p.fh.pt != CONNECT {
+		fmt.Printf("client attempted to send packet other than CONNECT first: %v\n", p.fh.pt)
+		return
+	}
+}
 
-	// TODO:
-	if flags&0b00000100 != 0 {
-		fmt.Printf("we got will props/topic/payload!\n")
+// TODO:
+// - deal with data not being big enough for whole packet
+func decodePacket(data []byte) (packet, error) {
+	var p packet
+
+	fh, err := decodeFixedHeader(data)
+	if err != nil {
+		return p, err
 	}
-	if flags&0b10000000 != 0 {
-		fmt.Printf("we got a user name!\n")
-	}
-	if flags&0b01000000 != 0 {
-		fmt.Printf("we got a password!\n")
+	p.fh = fh
+
+	rest := data[fh.len : fh.len+fh.remLen]
+	switch fh.pt {
+	case CONNECT:
+		fmt.Printf("connect packet\n")
+		// check protocol name
+		if string(rest[2:6]) != "MQTT" {
+			return p, errors.New("invalid protocol name")
+		}
+		// check protocol version
+		// TODO: support older versions
+		if int(rest[6]) != 5 {
+			return p, errors.New("invalid protocol version")
+		}
+
+		flags := rest[7]
+		// check reserved flag
+		if flags&1 != 0 {
+			return p, errors.New("reserved flag set, malformed packet")
+		}
+
+		p.keepAlive = binary.BigEndian.Uint16(rest[8:10])
+
+		propLen, propLenSize, err := decodeVariableByteInt(rest[10:])
+		if err != nil {
+			return p, err
+		}
+		props, err := decodeProps(rest[10+propLenSize : 10+propLenSize+int(propLen)])
+		if err != nil {
+			return p, err
+		}
+		p.props = props
+
+		payload := rest[10+propLenSize+int(propLen):]
+
+		l := binary.BigEndian.Uint16(payload[0:2])
+		p.cid = string(payload[2 : 2+l])
+		payload = payload[2+l:]
+
+		if flags&0b00000100 != 0 {
+			// will props
+			willPropsLen, willPropsLenSize, err := decodeVariableByteInt(payload)
+			if err != nil {
+				return p, err
+			}
+			willProps, err := decodeProps(payload[willPropsLenSize : willPropsLenSize+int(willPropsLen)])
+			if err != nil {
+				return p, err
+			}
+			p.willProps = willProps
+			payload = payload[willPropsLenSize+int(willPropsLen):]
+			l := binary.BigEndian.Uint16(payload[0:2])
+			p.willTopic = string(payload[2 : 2+int(l)])
+			payload = payload[2+int(l):]
+			l = binary.BigEndian.Uint16(payload[0:2])
+			p.willPayload = payload[2 : 2+int(l)]
+			payload = payload[2+int(l):]
+		}
+
+		if flags&0b10000000 != 0 {
+			// user name
+			l := binary.BigEndian.Uint16(payload[0:2])
+			p.username = string(payload[2 : 2+int(l)])
+			payload = payload[2+int(l):]
+		}
+
+		if flags&0b01000000 != 0 {
+			l := binary.BigEndian.Uint16(payload[0:2])
+			p.password = payload[2 : 2+int(l)]
+		}
+	default:
+		return p, errors.New("unsupported packet type")
 	}
 
+	return p, nil
 }
 
 func decodeFixedHeader(data []byte) (fixedHeader, error) {
@@ -219,6 +270,155 @@ func decodeVariableByteInt(data []byte) (uint32, int, error) {
 	return value, i + 1, nil
 }
 
+// TODO: maybe some more error handling
+func decodeProps(data []byte) (properties, error) {
+	var props properties
+
+	i := 0
+	for i < len(data) {
+		id, l, err := decodeVariableByteInt(data[i:])
+		if err != nil {
+			return props, err
+		}
+		i += l
+		switch id {
+		case 0x01:
+			// payload format indicator
+			props.plFormatId = data[i]
+			i += 1
+		case 0x02:
+			// message expiry interval
+			props.msgExpInterval = binary.BigEndian.Uint32(data[i : i+4])
+			i += 4
+		case 0x03:
+			// content type
+			l := binary.BigEndian.Uint16(data[i : i+2])
+			props.contentType = string(data[i+2 : i+2+int(l)])
+			i += 2 + int(l)
+		case 0x08:
+			// response topic
+			l := binary.BigEndian.Uint16(data[i : i+2])
+			props.respTopic = string(data[i+2 : i+2+int(l)])
+			i += 2 + int(l)
+		case 0x09:
+			// correlation data
+			l := binary.BigEndian.Uint16(data[i : i+2])
+			props.corrData = data[i+2 : i+2+int(l)]
+			i += 2 + int(l)
+		case 0x0B:
+			// subscription identifier
+			subId, l, err := decodeVariableByteInt(data[i:])
+			if err != nil {
+				return props, err
+			}
+			props.subId = subId
+			i += l
+		case 0x11:
+			// session expiry interval
+			props.sessExpInterval = binary.BigEndian.Uint32(data[i : i+4])
+			i += 4
+		case 0x12:
+			// assigned client identifier
+			l := binary.BigEndian.Uint16(data[i : i+2])
+			props.assignedClId = string(data[i+2 : i+2+int(l)])
+			i += 2 + int(l)
+		case 0x13:
+			// server keep alive
+			props.serverKA = binary.BigEndian.Uint16(data[i : i+2])
+			i += 2
+		case 0x15:
+			// authentication method
+			l := binary.BigEndian.Uint16(data[i : i+2])
+			props.authMethod = string(data[i+2 : i+2+int(l)])
+			i += 2 + int(l)
+		case 0x16:
+			// authentication data
+			l := binary.BigEndian.Uint16(data[i : i+2])
+			props.authData = data[i+2 : i+2+int(l)]
+			i += 2 + int(l)
+		case 0x17:
+			// request problem information
+			props.reqProbInfo = data[i]
+			i += 1
+		case 0x18:
+			// will delay interval
+			props.willDelInterval = binary.BigEndian.Uint32(data[i : i+4])
+			i += 4
+		case 0x19:
+			// request response information
+			props.reqRespInfo = data[i]
+			i += 1
+		case 0x1A:
+			// response information
+			l := binary.BigEndian.Uint16(data[i : i+2])
+			props.respInfo = string(data[i+2 : i+2+int(l)])
+			i += 2 + int(l)
+		case 0x1C:
+			// server reference
+			l := binary.BigEndian.Uint16(data[i : i+2])
+			props.serverRef = string(data[i+2 : i+2+int(l)])
+			i += 2 + int(l)
+		case 0x1F:
+			// reason string
+			l := binary.BigEndian.Uint16(data[i : i+2])
+			props.reasonStr = string(data[i+2 : i+2+int(l)])
+			i += 2 + int(l)
+		case 0x21:
+			// receive maximum
+			props.recvMax = binary.BigEndian.Uint16(data[i : i+2])
+			i += 2
+		case 0x22:
+			// topic alias maximum
+			props.topicAliasMax = binary.BigEndian.Uint16(data[i : i+2])
+			i += 2
+		case 0x23:
+			// topic alias
+			props.topicAlias = binary.BigEndian.Uint16(data[i : i+2])
+			i += 2
+		case 0x24:
+			// maximum qos
+			props.maxQOS = data[i]
+			i += 1
+		case 0x25:
+			// retain available
+			props.retAvail = data[i]
+			i += 1
+		case 0x26:
+			// user property
+
+			// key
+			l := binary.BigEndian.Uint16(data[i : i+2])
+			props.userProp.key = string(data[i+2 : i+2+int(l)])
+			i += 2 + int(l)
+
+			// val
+			l = binary.BigEndian.Uint16(data[i : i+2])
+			props.userProp.val = string(data[i+2 : i+2+int(l)])
+			i += 2 + int(l)
+		case 0x27:
+			// maximum packet size
+			props.maxPacketSize = binary.BigEndian.Uint32(data[i : i+4])
+			i += 4
+		case 0x28:
+			// wildcard subscription available
+			props.wildSubAvail = data[i]
+			i += 1
+		case 0x29:
+			// subscription identifier available
+			props.subIdAvail = data[i]
+			i += 1
+		case 0x2A:
+			// shared subscription available
+			props.sharedSubAvail = data[i]
+			i += 1
+		default:
+			return props, errors.New("invalid property type")
+		}
+	}
+
+	return props, nil
+}
+
 func main() {
 	listener, err := net.Listen("tcp", ":1883")
 	if err != nil {
@@ -231,6 +431,6 @@ func main() {
 			fmt.Printf("error accepting connection: %v", err)
 			continue
 		}
-		go handleConn(conn)
+		go addConn(conn)
 	}
 }
