@@ -1,5 +1,5 @@
 syntax = "proto3";
-option go_package = "github.com/andrew-r-thomas/balsa";
+option go_package = "github.com/andrew-r-thomas/balsa/node";
 
 service Raft {
   rpc Hello(HelloRequest) returns (HelloResponse) {}

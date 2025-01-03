@@ -4,7 +4,7 @@
 // - protoc             v5.29.2
 // source: grpc/raft.proto
 
-package balsa
+package node
 
 import (
 	context "context"
