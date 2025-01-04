@@ -4,7 +4,6 @@ import (
 	"log"
 	"os"
 	"strconv"
-	"sync"
 )
 
 func main() {
@@ -19,18 +18,7 @@ func main() {
 	httpPort := args[2+nodes-1]
 
 	balsa := NewBalsa(servePort, siblingPorts, httpPort)
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		balsa.ServeHttp()
-	}()
-	go func() {
-		defer wg.Done()
-		balsa.ServeGrpc()
-	}()
-
-	wg.Wait()
+	balsa.Start()
 
 	log.Printf("%s shut down\n", servePort)
 }
