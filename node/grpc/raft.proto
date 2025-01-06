@@ -2,21 +2,17 @@ syntax = "proto3";
 option go_package = "github.com/andrew-r-thomas/balsa/node";
 
 service Raft {
-  rpc Hello(HelloRequest) returns (HelloResponse) {}
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse) {}
   rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse) {}
 }
 
-message HelloRequest { string name = 1; }
-message HelloResponse { string response = 1; }
-
 message AppendEntriesRequest {
   uint64 term = 1;
   string leaderId = 2;
-  uint64 prevLogIndex = 3;
-  uint64 prevLogTerm = 4;
-  repeated LogEntry entries = 5;
-  uint64 leaderCommit = 6;
+  // uint64 prevLogIndex = 3;
+  // uint64 prevLogTerm = 4;
+  // repeated LogEntry entries = 5;
+  // uint64 leaderCommit = 6;
 }
 message AppendEntriesResponse {
   uint64 term = 1;
@@ -32,8 +28,8 @@ message LogEntry {
 message RequestVoteRequest {
   uint64 term = 1;
   string candidateId = 2;
-  uint64 lastLogIndex = 3;
-  uint64 lastLogTerm = 4;
+  // uint64 lastLogIndex = 3;
+  // uint64 lastLogTerm = 4;
 }
 message RequestVoteResponse {
   uint64 term = 1;
