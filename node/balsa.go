@@ -12,7 +12,6 @@ import (
 	"log"
 	"math/rand/v2"
 	"net"
-	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -24,181 +23,54 @@ import (
 const toMin int = 150
 const toMax int = 300
 
-type sibling struct {
-	client pb.RaftClient
+type siblings struct {
+	clients map[string]pb.RaftClient
+	resChan chan sibResp
+}
+type sibResp struct {
+	id     string
+	rvResp *pb.RequestVoteResponse
+	aeResp *pb.AppendEntriesResponse
 }
 
 type Balsa struct {
-	id       string
-	siblings map[string]sibling
+	id   string
+	sibs siblings
 
 	pb.UnimplementedRaftServer
-	grpcPort string
 
 	// TODO: persitent state
 	currentTerm uint64
 	votedFor    string
 
-	toChan chan struct{}
+	elChan chan struct{}
 }
 
-func NewBalsa(id string, grpcPort string, siblingPorts map[string]string) Balsa {
-	siblings := make(map[string]sibling, len(siblingPorts))
-	for id, sibPort := range siblingPorts {
-		var opts []grpc.DialOption
-		opts = append(
-			opts,
-			grpc.WithTransportCredentials(
-				insecure.NewCredentials(),
-			),
-		)
-
-		conn, err := grpc.NewClient(":"+sibPort, opts...)
+func NewBalsa(id string, siblingPorts map[string]string) Balsa {
+	sibClients := make(map[string]pb.RaftClient, len(siblingPorts))
+	resChan := make(chan sibResp, len(siblingPorts))
+	for sibId, sibPort := range siblingPorts {
+		opts := grpc.WithTransportCredentials(insecure.NewCredentials())
+		conn, err := grpc.NewClient(":"+sibPort, opts)
 		if err != nil {
-			log.Fatalf("error creating client: %v\n", err)
+			log.Fatalf("failed to create sibling connection: %v\n", err)
 		}
-
 		client := pb.NewRaftClient(conn)
-		siblings[id] = sibling{client: client}
+		sibClients[sibId] = client
+	}
+	sibs := siblings{
+		clients: sibClients,
+		resChan: resChan,
 	}
 
-	toChan := make(chan struct{})
+	elChan := make(chan struct{}, 1)
 
-	return Balsa{
-		grpcPort: grpcPort,
-		siblings: siblings,
-		id:       id,
-		toChan:   toChan,
-	}
+	return Balsa{id: id, sibs: sibs, elChan: elChan}
 }
-func (balsa *Balsa) Start() {
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-		balsa.serveGrpc()
-	}()
-
-	// TODO: do we need a wait group here?
-	go balsa.follow()
-
-	wg.Wait()
-}
-
-func (balsa *Balsa) follow() {
-	log.Printf("%s: following %s", balsa.id, balsa.votedFor)
-	to := getTimeout()
-
-	select {
-	case <-balsa.toChan:
-		go balsa.follow()
-	case <-to:
-		// start election
-		go balsa.startElection()
-	}
-}
-func (balsa *Balsa) startElection() {
-	// TODO: locks and persistence oh my
-	log.Printf("%s: starting election\n", balsa.id)
-
-	// increment current term
-	balsa.currentTerm += 1
-	// vote for self
-	balsa.votedFor = balsa.id
-
-	// reset election timer
-	to := getTimeout()
-
-	// request votes from other servers
-	votesChan := make(chan bool)
-	for _, sibling := range balsa.siblings {
-		go func() {
-			resp, err := sibling.client.RequestVote(
-				context.Background(),
-				&pb.RequestVoteRequest{
-					Term:        balsa.currentTerm,
-					CandidateId: balsa.id,
-				},
-			)
-			if err == nil {
-				votesChan <- resp.GetVoteGranted()
-			}
-		}()
-	}
-	majVotesChan := make(chan struct{})
-	go func() {
-		votes := 0
-		for {
-			vote := <-votesChan
-			if vote {
-				votes += 1
-				if votes >= len(balsa.siblings)/2 {
-					close(majVotesChan)
-					break
-				}
-			}
-		}
-	}()
-
-	select {
-	case <-to:
-		// if election timeout elapses -> start new election
-		go balsa.startElection()
-	case <-balsa.toChan:
-		// if recieve append entries from new leader -> convert to follower
-		// TODO: gonna need to make sure this is correct
-		go balsa.follow()
-	case <-majVotesChan:
-		// if recieve majority of votes -> convert to leader
-		go balsa.lead()
-	}
-}
-func (balsa *Balsa) lead() {
-	log.Printf("%s: leading\n", balsa.id)
-	for _, sibling := range balsa.siblings {
-		go func() {
-			resp, err := sibling.client.AppendEntries(
-				context.Background(),
-				&pb.AppendEntriesRequest{
-					Term:     balsa.currentTerm,
-					LeaderId: balsa.id,
-				})
-			if err != nil {
-				log.Printf("%s: error sending append entries request: %v", balsa.id, err)
-			}
-
-			if !resp.GetSuccess() &&
-				resp.GetTerm() > balsa.currentTerm {
-				// TODO: deal with new leader
-				log.Printf("unsuccussful heartbeat\n")
-			}
-		}()
-	}
-	to := getTimeout()
-
-	select {
-	case <-to:
-		balsa.lead()
-	case <-balsa.toChan:
-		go balsa.follow()
-	}
-}
-
-func (balsa *Balsa) serveGrpc() {
-	var opts []grpc.ServerOption
-	grpcServer := grpc.NewServer(opts...)
-	pb.RegisterRaftServer(grpcServer, balsa)
-
-	listener, err := net.Listen("tcp", ":"+balsa.grpcPort)
-	if err != nil {
-		log.Fatalf("error starting lisener: %v\n", err)
-	}
-	log.Printf("lisenting on %s\n", balsa.grpcPort)
-	err = grpcServer.Serve(listener)
-	if err != nil {
-		log.Fatalf("failed to serve grpc: %v\n", err)
-	}
+func (balsa *Balsa) Start(grpcPort string) {
+	go balsa.serveGrpc(grpcPort)
+	time.Sleep(time.Second)
+	balsa.startElLoop()
 }
 
 func (balsa *Balsa) AppendEntries(
@@ -216,7 +88,7 @@ func (balsa *Balsa) AppendEntries(
 
 	balsa.currentTerm = reqTerm
 	balsa.votedFor = request.GetLeaderId()
-	balsa.toChan <- struct{}{}
+	balsa.elChan <- struct{}{}
 
 	return &pb.AppendEntriesResponse{
 		Term:    balsa.currentTerm,
@@ -227,27 +99,160 @@ func (balsa *Balsa) RequestVote(
 	ctx context.Context,
 	request *pb.RequestVoteRequest,
 ) (*pb.RequestVoteResponse, error) {
-	if request.GetTerm() < balsa.currentTerm {
+	switch reqTerm := request.GetTerm(); {
+	case reqTerm < balsa.currentTerm:
 		return &pb.RequestVoteResponse{
 			VoteGranted: false,
 			Term:        balsa.currentTerm,
 		}, nil
-	}
-
-	if balsa.votedFor == "" || balsa.votedFor == request.GetCandidateId() {
+	case reqTerm == balsa.currentTerm:
+		if balsa.votedFor == "" || balsa.votedFor == request.GetCandidateId() {
+			balsa.votedFor = request.GetCandidateId()
+			balsa.currentTerm = request.GetTerm()
+			balsa.elChan <- struct{}{}
+			return &pb.RequestVoteResponse{
+				VoteGranted: true,
+				Term:        balsa.currentTerm,
+			}, nil
+		}
+	case reqTerm > balsa.currentTerm:
 		balsa.votedFor = request.GetCandidateId()
 		balsa.currentTerm = request.GetTerm()
-		balsa.toChan <- struct{}{}
+		balsa.elChan <- struct{}{}
 		return &pb.RequestVoteResponse{
 			VoteGranted: true,
 			Term:        balsa.currentTerm,
 		}, nil
+
 	}
 
 	return &pb.RequestVoteResponse{
 		VoteGranted: false,
 		Term:        balsa.currentTerm,
 	}, nil
+}
+
+func (balsa *Balsa) serveGrpc(port string) {
+	var opts []grpc.ServerOption
+	grpcServer := grpc.NewServer(opts...)
+	pb.RegisterRaftServer(grpcServer, balsa)
+
+	listener, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		log.Fatalf("error starting lisener: %v\n", err)
+	}
+	log.Printf("lisenting on %s\n", port)
+	err = grpcServer.Serve(listener)
+	if err != nil {
+		log.Fatalf("failed to serve grpc: %v\n", err)
+	}
+}
+
+type elState int
+
+const (
+	follower elState = iota
+	candidate
+	leader
+)
+
+func (balsa *Balsa) startElLoop() {
+	state := follower
+elLoop:
+	for {
+		switch state {
+		case follower:
+			to := getTimeout()
+			select {
+			case <-to:
+				state = candidate
+				continue
+			case <-balsa.elChan:
+				continue
+			}
+		case candidate:
+			balsa.currentTerm += 1
+			balsa.votedFor = balsa.id
+
+			to := getTimeout()
+
+			for id, sibClient := range balsa.sibs.clients {
+				go func() {
+					res, err := sibClient.RequestVote(
+						context.Background(),
+						&pb.RequestVoteRequest{
+							Term:        balsa.currentTerm,
+							CandidateId: balsa.id,
+						},
+					)
+					if err != nil {
+						log.Printf("error requesting vote: %v\n", err)
+					} else {
+						balsa.sibs.resChan <- sibResp{rvResp: res, id: id}
+					}
+				}()
+			}
+
+			votes := 0
+			for {
+				select {
+				case <-to:
+					continue elLoop
+				case res := <-balsa.sibs.resChan:
+					if res.rvResp.GetVoteGranted() {
+						votes += 1
+						if votes >= len(balsa.sibs.clients) {
+							state = leader
+							continue elLoop
+						}
+					} else {
+						log.Printf("vote not grated\n")
+					}
+				case <-balsa.elChan:
+					state = follower
+					continue elLoop
+				}
+			}
+		case leader:
+			to := getTimeout()
+			for id, sibClient := range balsa.sibs.clients {
+				go func() {
+					res, err := sibClient.AppendEntries(
+						context.Background(),
+						&pb.AppendEntriesRequest{
+							Term:     balsa.currentTerm,
+							LeaderId: balsa.id,
+						},
+					)
+					if err != nil {
+						log.Printf("append entries failed: %v\n", err)
+					} else {
+						balsa.sibs.resChan <- sibResp{id: id, aeResp: res}
+					}
+
+				}()
+			}
+
+			for {
+				select {
+				case <-to:
+					continue elLoop
+				case res := <-balsa.sibs.resChan:
+					if !res.aeResp.GetSuccess() {
+						if res.aeResp.GetTerm() > balsa.currentTerm {
+							balsa.currentTerm = res.aeResp.GetTerm()
+							balsa.votedFor = res.id
+							state = follower
+							continue elLoop
+						}
+					}
+				case <-balsa.elChan:
+					state = follower
+					continue elLoop
+				}
+			}
+		}
+	}
 }
 
 func getTimeout() <-chan time.Time {

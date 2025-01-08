@@ -23,8 +23,8 @@ func main() {
 		siblings[pair[0]] = pair[1]
 	}
 
-	balsa := NewBalsa(id, servePort, siblings)
-	balsa.Start()
+	balsa := NewBalsa(id, siblings)
+	balsa.Start(servePort)
 
 	log.Printf("%s shut down\n", servePort)
 }
