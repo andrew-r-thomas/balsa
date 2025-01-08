@@ -69,7 +69,6 @@ func NewBalsa(id string, siblingPorts map[string]string) Balsa {
 }
 func (balsa *Balsa) Start(grpcPort string) {
 	go balsa.serveGrpc(grpcPort)
-	time.Sleep(time.Second)
 	balsa.startElLoop()
 }
 
@@ -156,10 +155,24 @@ const (
 	leader
 )
 
+func (s elState) String() string {
+	switch s {
+	case follower:
+		return "follower"
+	case candidate:
+		return "candidate"
+	case leader:
+		return "leader"
+	default:
+		return "error parsing elState"
+	}
+}
+
 func (balsa *Balsa) startElLoop() {
 	state := follower
 elLoop:
 	for {
+		log.Printf("%s status is %v\n", balsa.id, state)
 		switch state {
 		case follower:
 			to := getTimeout()
@@ -205,8 +218,6 @@ elLoop:
 							state = leader
 							continue elLoop
 						}
-					} else {
-						log.Printf("vote not grated\n")
 					}
 				case <-balsa.elChan:
 					state = follower
