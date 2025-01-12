@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os/exec"
@@ -66,33 +67,43 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("error upgrading websocket: %v\n", err)
 	}
 
-	readChan := make(chan wsCmd)
-	go wsReader(conn, readChan)
-
-	writeChan := make(chan wsMsg)
-	go wsWriter(conn, writeChan)
-
-	var sim sim
-	sim.writer = simWriter{ch: writeChan}
-	for msg := range readChan {
-		switch msg.Cmd {
-		case "start":
-			if !sim.started {
-				sim.started = true
-				ctx, cancel := context.WithCancel(context.Background())
-				sim.ctx = ctx
-				sim.cancel = cancel
-				go sim.start()
-			}
-		default:
-			log.Printf("invalid message from client: %v\n", msg)
-		}
+	// wait for initial start command
+	var cmd wsCmd
+	err = conn.ReadJSON(&cmd)
+	if err != nil {
+		log.Printf("error reading message from client: %v\n", err)
+		conn.Close()
+		return
 	}
-	// TODO: stop sim
-	if sim.started {
-		sim.cancel()
+	if cmd.Cmd != "start" {
+		log.Fatalf("invalid initial command: %s\n", cmd.Cmd)
 	}
-	close(writeChan)
+
+	writeChan := make(chan wsMsg, 100)
+	ctx, cancel := context.WithCancel(context.Background())
+	sim := sim{
+		writer: simWriter{ch: writeChan},
+		ctx:    ctx,
+		cancel: cancel,
+	}
+	go sim.start()
+
+	ids := make([]string, len(nodes))
+	for _, n := range nodes {
+		ids = append(ids, n[0])
+	}
+	err = conn.WriteJSON(
+		wsMsg{
+			MsgType: "sim_started",
+			Payload: simStartedMsg{
+				Ids: ids,
+			},
+		},
+	)
+
+	wsWriter(conn, writeChan)
+	sim.cancel()
+
 	log.Printf("closing connection\n")
 }
 
@@ -103,30 +114,14 @@ type wsMsg struct {
 	MsgType string      `json:"msg_type"`
 	Payload interface{} `json:"payload"`
 }
-type logMsg struct {
-	Log string `json:"log"`
+type simStartedMsg struct {
+	Ids []string `json:"ids"`
 }
-
-func wsReader(conn *websocket.Conn, readChan chan<- wsCmd) {
-	for {
-		var cmd wsCmd
-		err := conn.ReadJSON(&cmd)
-		if err != nil {
-			if websocket.IsCloseError(
-				err,
-				websocket.CloseGoingAway,
-				websocket.CloseNormalClosure,
-				websocket.CloseNoStatusReceived,
-			) {
-				log.Printf("client closed connection\n")
-				close(readChan)
-				return
-			}
-			log.Printf("error reading message from client: %v\n", err)
-		}
-
-		readChan <- cmd
-	}
+type stateUpdateMsg struct {
+	Node   string `json:"node"`
+	State  string `json:"state"`
+	Leader string `json:"leader"`
+	Term   int    `json:"term"`
 }
 
 func wsWriter(conn *websocket.Conn, writeChan <-chan wsMsg) {
@@ -139,18 +134,40 @@ func wsWriter(conn *websocket.Conn, writeChan <-chan wsMsg) {
 }
 
 type sim struct {
-	started bool
-	writer  simWriter
-	ctx     context.Context
-	cancel  context.CancelFunc
+	writer simWriter
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 type simWriter struct {
 	ch chan<- wsMsg
 }
 
 func (sw simWriter) Write(p []byte) (int, error) {
-	log := string(p)
-	sw.ch <- wsMsg{MsgType: "log", Payload: logMsg{Log: log}}
+	var logMap map[string]interface{}
+	err := json.Unmarshal(p, &logMap)
+	if err != nil {
+		log.Printf("error unmarshalling log: %v\n", err)
+		return len(p), nil
+	}
+
+	switch logMap["level"] {
+	case "INFO":
+		msg := wsMsg{
+			MsgType: "state_update",
+			Payload: stateUpdateMsg{
+				Node:   logMap["node"].(string),
+				State:  logMap["state"].(string),
+				Leader: logMap["leader"].(string),
+				Term:   int(logMap["term"].(float64)),
+			},
+		}
+		sw.ch <- msg
+	case "ERROR":
+		log.Printf("node error: %s\n", logMap["msg"])
+	default:
+		log.Printf("invalid level: %v\n", logMap["level"])
+	}
+
 	return len(p), nil
 }
 
@@ -180,6 +197,5 @@ func (s *sim) start() {
 	case <-doneChan:
 	}
 
-	s.started = false
 	log.Printf("sim finished\n")
 }
