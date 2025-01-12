@@ -88,7 +88,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	go sim.start()
 
-	ids := make([]string, len(nodes))
+	ids := []string{}
 	for _, n := range nodes {
 		ids = append(ids, n[0])
 	}
@@ -104,7 +104,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	wsWriter(conn, writeChan)
 	sim.cancel()
 
-	log.Printf("closing connection\n")
+	log.Printf("sim ended\n")
 }
 
 type wsCmd struct {
@@ -130,6 +130,16 @@ func wsWriter(conn *websocket.Conn, writeChan <-chan wsMsg) {
 		if err != nil {
 			log.Printf("error writing message to client: %v\n", err)
 		}
+	}
+}
+func wsReader(conn *websocket.Conn, readChan chan<- wsCmd) {
+	for {
+		var cmd wsCmd
+		err := conn.ReadJSON(&cmd)
+		if err != nil {
+			// TODO:
+		}
+		readChan <- cmd
 	}
 }
 
