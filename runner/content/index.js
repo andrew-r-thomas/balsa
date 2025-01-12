@@ -47,13 +47,28 @@ const startSim = () => {
 				}
 				break
 			case "state_update":
+				const node = document.getElementById(`${data.payload.node}`)
 				const state = document.getElementById(`${data.payload.node}/state`)
 				const leader = document.getElementById(`${data.payload.node}/leader`)
 				const term = document.getElementById(`${data.payload.node}/term`)
 
-				state.textContent = data.payload.state
-				leader.textContent = data.payload.leader
-				term.textContent = data.payload.term
+				state.textContent = "state: " + data.payload.state
+				leader.textContent = "leader: " + data.payload.leader
+				term.textContent = "term: " + data.payload.term
+
+				switch (data.payload.state) {
+					case "follower":
+						node.style.backgroundColor = "white"
+						break
+					case "candidate":
+						node.style.backgroundColor = "orange"
+						break
+					case "leader":
+						node.style.backgroundColor = "green"
+						break
+					default:
+						break
+				}
 				break
 			default:
 				console.log("ahhh!!!")

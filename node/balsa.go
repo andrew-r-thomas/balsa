@@ -45,6 +45,8 @@ type Balsa struct {
 	currentTerm uint64
 	votedFor    string
 
+	state elState
+
 	elChan chan struct{}
 
 	logger *slog.Logger
@@ -82,7 +84,7 @@ func NewBalsa(
 
 	elChan := make(chan struct{}, 1)
 
-	return Balsa{id: id, sibs: sibs, elChan: elChan, logger: logger}
+	return Balsa{id: id, sibs: sibs, elChan: elChan, logger: logger, state: follower}
 }
 func (balsa *Balsa) Start(grpcPort string) {
 	go balsa.serveGrpc(grpcPort)
@@ -104,6 +106,7 @@ func (balsa *Balsa) AppendEntries(
 
 	balsa.currentTerm = reqTerm
 	balsa.votedFor = request.GetLeaderId()
+	balsa.logState()
 	balsa.elChan <- struct{}{}
 
 	return &pb.AppendEntriesResponse{
@@ -126,6 +129,7 @@ func (balsa *Balsa) RequestVote(
 			balsa.votedFor == request.GetCandidateId() {
 			balsa.votedFor = request.GetCandidateId()
 			balsa.currentTerm = request.GetTerm()
+			balsa.logState()
 			balsa.elChan <- struct{}{}
 			return &pb.RequestVoteResponse{
 				VoteGranted: true,
@@ -135,6 +139,7 @@ func (balsa *Balsa) RequestVote(
 	case reqTerm > balsa.currentTerm:
 		balsa.votedFor = request.GetCandidateId()
 		balsa.currentTerm = request.GetTerm()
+		balsa.logState()
 		balsa.elChan <- struct{}{}
 		return &pb.RequestVoteResponse{
 			VoteGranted: true,
@@ -191,16 +196,15 @@ func (s elState) String() string {
 }
 
 func (balsa *Balsa) startElLoop() {
-	state := follower
 	to := getTimeout()
-	balsa.logState(state)
 elLoop:
 	for {
-		switch state {
+		switch balsa.state {
 		case follower:
 			select {
 			case <-time.After(to):
-				state = candidate
+				balsa.state = candidate
+				balsa.logState()
 				continue
 			case <-balsa.elChan:
 				continue
@@ -209,7 +213,7 @@ elLoop:
 			balsa.currentTerm += 1
 			balsa.votedFor = balsa.id
 
-			balsa.logState(state)
+			balsa.logState()
 
 			to = getTimeout()
 
@@ -248,15 +252,15 @@ elLoop:
 						votes += 1
 						if votes >= len(balsa.sibs.clients) {
 							to = getTimeout()
-							state = leader
-							balsa.logState(state)
+							balsa.state = leader
+							balsa.logState()
 							continue elLoop
 						}
 					}
 				case <-balsa.elChan:
 					to = getTimeout()
-					state = follower
-					balsa.logState(state)
+					balsa.state = follower
+					balsa.logState()
 					continue elLoop
 				}
 			}
@@ -297,15 +301,15 @@ elLoop:
 							to = getTimeout()
 							balsa.currentTerm = res.aeResp.GetTerm()
 							balsa.votedFor = res.id
-							state = follower
-							balsa.logState(state)
+							balsa.state = follower
+							balsa.logState()
 							continue elLoop
 						}
 					}
 				case <-balsa.elChan:
 					to = getTimeout()
-					state = follower
-					balsa.logState(state)
+					balsa.state = follower
+					balsa.logState()
 					continue elLoop
 				}
 			}
@@ -317,13 +321,13 @@ func getTimeout() time.Duration {
 	return time.Duration(rand.IntN(toMax-toMin)+toMin) * time.Millisecond
 }
 
-func (balsa *Balsa) logState(state elState) {
+func (balsa *Balsa) logState() {
 	balsa.logger.Info(
 		"",
 		"node",
 		balsa.id,
 		"state",
-		state.String(),
+		balsa.state.String(),
 		"leader",
 		balsa.votedFor,
 		"term",

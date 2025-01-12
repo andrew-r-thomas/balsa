@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log"
@@ -67,42 +68,43 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("error upgrading websocket: %v\n", err)
 	}
 
-	// wait for initial start command
-	var cmd wsCmd
-	err = conn.ReadJSON(&cmd)
-	if err != nil {
-		log.Printf("error reading message from client: %v\n", err)
-		conn.Close()
-		return
-	}
-	if cmd.Cmd != "start" {
-		log.Fatalf("invalid initial command: %s\n", cmd.Cmd)
-	}
+	readChan := make(chan wsCmd)
+	writeChan := make(chan wsMsg)
 
-	writeChan := make(chan wsMsg, 100)
 	ctx, cancel := context.WithCancel(context.Background())
 	sim := sim{
-		writer: simWriter{ch: writeChan},
-		ctx:    ctx,
-		cancel: cancel,
+		writer:  simWriter{ch: writeChan},
+		ctx:     ctx,
+		cancel:  cancel,
+		running: false,
 	}
-	go sim.start()
+
+	go wsWriter(conn, writeChan)
+	go wsReader(conn, readChan)
 
 	ids := []string{}
 	for _, n := range nodes {
 		ids = append(ids, n[0])
 	}
-	err = conn.WriteJSON(
-		wsMsg{
-			MsgType: "sim_started",
-			Payload: simStartedMsg{
-				Ids: ids,
-			},
-		},
-	)
+	for cmd := range readChan {
+		switch cmd.Cmd {
+		case "start":
+			if !sim.running {
+				go sim.start()
+			}
+			writeChan <- wsMsg{
+				MsgType: "sim_started",
+				Payload: simStartedMsg{
+					Ids: ids,
+				},
+			}
+		default:
+			log.Printf("invalid command: %s\n", cmd.Cmd)
+		}
+	}
 
-	wsWriter(conn, writeChan)
 	sim.cancel()
+	close(writeChan)
 
 	log.Printf("sim ended\n")
 }
@@ -137,51 +139,68 @@ func wsReader(conn *websocket.Conn, readChan chan<- wsCmd) {
 		var cmd wsCmd
 		err := conn.ReadJSON(&cmd)
 		if err != nil {
-			// TODO:
+			if websocket.IsCloseError(
+				err,
+				websocket.CloseGoingAway,
+				websocket.CloseNormalClosure,
+				websocket.CloseNoStatusReceived,
+			) {
+				close(readChan)
+				return
+			}
+			log.Printf("error reading message: %v\n", err)
 		}
 		readChan <- cmd
 	}
 }
 
 type sim struct {
-	writer simWriter
-	ctx    context.Context
-	cancel context.CancelFunc
+	writer  simWriter
+	ctx     context.Context
+	cancel  context.CancelFunc
+	running bool
 }
 type simWriter struct {
 	ch chan<- wsMsg
 }
 
 func (sw simWriter) Write(p []byte) (int, error) {
-	var logMap map[string]interface{}
-	err := json.Unmarshal(p, &logMap)
-	if err != nil {
-		log.Printf("error unmarshalling log: %v\n", err)
-		return len(p), nil
-	}
-
-	switch logMap["level"] {
-	case "INFO":
-		msg := wsMsg{
-			MsgType: "state_update",
-			Payload: stateUpdateMsg{
-				Node:   logMap["node"].(string),
-				State:  logMap["state"].(string),
-				Leader: logMap["leader"].(string),
-				Term:   int(logMap["term"].(float64)),
-			},
+	logs := bytes.Split(p, []byte{'\n'})
+	logMaps := make([]map[string]interface{}, len(logs))
+	for i, l := range logs {
+		if len(l) == 0 {
+			continue
 		}
-		sw.ch <- msg
-	case "ERROR":
-		log.Printf("node error: %s\n", logMap["msg"])
-	default:
-		log.Printf("invalid level: %v\n", logMap["level"])
+		err := json.Unmarshal(l, &logMaps[i])
+		if err != nil {
+			log.Printf("error unmarshalling log: %v\n", err)
+			return len(p), nil
+		}
+
+		switch logMaps[i]["level"] {
+		case "INFO":
+			msg := wsMsg{
+				MsgType: "state_update",
+				Payload: stateUpdateMsg{
+					Node:   logMaps[i]["node"].(string),
+					State:  logMaps[i]["state"].(string),
+					Leader: logMaps[i]["leader"].(string),
+					Term:   int(logMaps[i]["term"].(float64)),
+				},
+			}
+			sw.ch <- msg
+		case "ERROR":
+			log.Printf("node error: %s\n", logMaps[i]["msg"])
+		default:
+			log.Printf("invalid level: %v\n", logMaps[i]["level"])
+		}
 	}
 
 	return len(p), nil
 }
 
 func (s *sim) start() {
+	s.running = true
 	doneChan := make(chan struct{}, 1)
 	go func() {
 		var wg sync.WaitGroup
@@ -191,10 +210,7 @@ func (s *sim) start() {
 				cmd := exec.CommandContext(ctx, "../node/node", args...)
 				cmd.Stdout = s.writer
 				cmd.Stderr = s.writer
-				err := cmd.Run()
-				if err != nil {
-					log.Printf("error running node: %v\n", err)
-				}
+				cmd.Run()
 				wg.Done()
 			}(s.ctx)
 		}
@@ -206,6 +222,8 @@ func (s *sim) start() {
 	case <-s.ctx.Done():
 	case <-doneChan:
 	}
+
+	s.running = false
 
 	log.Printf("sim finished\n")
 }
