@@ -120,10 +120,9 @@ type simStartedMsg struct {
 	Ids []string `json:"ids"`
 }
 type stateUpdateMsg struct {
-	Node   string `json:"node"`
-	State  string `json:"state"`
-	Leader string `json:"leader"`
-	Term   int    `json:"term"`
+	Node string      `json:"node"`
+	Msg  string      `json:"msg"`
+	Val  interface{} `json:"val"`
 }
 
 func wsWriter(conn *websocket.Conn, writeChan <-chan wsMsg) {
@@ -182,10 +181,9 @@ func (sw simWriter) Write(p []byte) (int, error) {
 			msg := wsMsg{
 				MsgType: "state_update",
 				Payload: stateUpdateMsg{
-					Node:   logMaps[i]["node"].(string),
-					State:  logMaps[i]["state"].(string),
-					Leader: logMaps[i]["leader"].(string),
-					Term:   int(logMaps[i]["term"].(float64)),
+					Node: logMaps[i]["node"].(string),
+					Msg:  logMaps[i]["msg"].(string),
+					Val:  logMaps[i][logMaps[i]["msg"].(string)],
 				},
 			}
 			sw.ch <- msg

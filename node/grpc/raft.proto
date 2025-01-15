@@ -22,7 +22,7 @@ message AppendEntriesResponse {
 message LogEntry {
   uint64 term = 1;
   string key = 2;
-  uint64 val = 3;
+  sfixed32 val = 3;
 }
 
 message RequestVoteRequest {

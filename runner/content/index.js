@@ -32,6 +32,7 @@ const startSim = () => {
 					ni.appendChild(idEl)
 
 					const stateEl = document.createElement("p")
+					stateEl.textContent = "state: follower"
 					stateEl.id = id + "/state"
 					ni.appendChild(stateEl)
 
@@ -48,30 +49,41 @@ const startSim = () => {
 				break
 			case "state_update":
 				const node = document.getElementById(`${data.payload.node}`)
-				const state = document.getElementById(`${data.payload.node}/state`)
-				const leader = document.getElementById(`${data.payload.node}/leader`)
-				const term = document.getElementById(`${data.payload.node}/term`)
 
-				state.textContent = "state: " + data.payload.state
-				leader.textContent = "leader: " + data.payload.leader
-				term.textContent = "term: " + data.payload.term
-
-				switch (data.payload.state) {
-					case "follower":
-						node.style.backgroundColor = "white"
-						break
-					case "candidate":
-						node.style.backgroundColor = "orange"
+				switch (data.payload.msg) {
+					case "state":
+						const state = document.getElementById(`${data.payload.node}/state`)
+						state.textContent = "state: " + data.payload.val
+						switch (data.payload.val) {
+							case "follower":
+								node.style.backgroundColor = "white"
+								break
+							case "candidate":
+								node.style.backgroundColor = "orange"
+								break
+							case "leader":
+								node.style.backgroundColor = "green"
+								break
+							default:
+								console.error("invalid node state!")
+								break
+						}
 						break
 					case "leader":
-						node.style.backgroundColor = "green"
+						const leader = document.getElementById(`${data.payload.node}/leader`)
+						leader.textContent = "leader: " + data.payload.val
+						break
+					case "term":
+						const term = document.getElementById(`${data.payload.node}/term`)
+						term.textContent = "term: " + data.payload.val
 						break
 					default:
+						console.error("invalid update message!")
 						break
 				}
 				break
 			default:
-				console.log("ahhh!!!")
+				console.error("invalid message type!")
 				break
 		}
 	})
